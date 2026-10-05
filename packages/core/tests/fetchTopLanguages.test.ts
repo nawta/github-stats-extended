@@ -56,6 +56,7 @@ const data_langs = {
             },
           },
         ],
+        pageInfo: { hasNextPage: false, endCursor: "cursor-1" },
       },
     },
   },
@@ -151,6 +152,70 @@ describe("FetchTopLanguages", () => {
         size: 2,
       },
     });
+  });
+
+  it("should fetch every page of repositories", async () => {
+    const repos = data_langs.data.user.repositories.nodes;
+    const page = (
+      nodes: typeof data_langs.data.user.repositories.nodes,
+      hasNextPage: boolean,
+      endCursor: string,
+    ) => ({
+      data: {
+        user: { repositories: { nodes, pageInfo: { hasNextPage, endCursor } } },
+      },
+    });
+    mock
+      .onPost("https://api.github.com/graphql")
+      .replyOnce(200, page(repos.slice(0, 2), true, "cursor-1"))
+      .onPost("https://api.github.com/graphql")
+      .replyOnce(200, page(repos.slice(2), false, "cursor-2"));
+
+    const repo = await fetchTopLanguages("anuraghazra", [], 0, 1);
+    expect(mock.history.post).toHaveLength(2);
+    expect(JSON.parse(mock.history.post[1]?.data as string)).toMatchObject({
+      variables: { after: "cursor-1" },
+    });
+    expect(repo).toStrictEqual({
+      HTML: { color: "#0f0", count: 2, name: "HTML", size: 2 },
+      javascript: { color: "#0ff", count: 2, name: "javascript", size: 2 },
+    });
+  });
+
+  it("should stop when the cursor does not advance", async () => {
+    mock.onPost("https://api.github.com/graphql").reply(200, {
+      data: {
+        user: {
+          repositories: {
+            nodes: data_langs.data.user.repositories.nodes,
+            pageInfo: { hasNextPage: true, endCursor: "same" },
+          },
+        },
+      },
+    });
+
+    await fetchTopLanguages("anuraghazra");
+    expect(mock.history.post).toHaveLength(2);
+  });
+
+  it("should stop after 10 pages", async () => {
+    let cursor = 0;
+    mock.onPost("https://api.github.com/graphql").reply(() => [
+      200,
+      {
+        data: {
+          user: {
+            repositories: {
+              nodes: data_langs.data.user.repositories.nodes,
+              pageInfo: { hasNextPage: true, endCursor: `cursor-${++cursor}` },
+            },
+          },
+        },
+      },
+    ]);
+
+    await fetchTopLanguages("anuraghazra");
+    expect(mock.history.post).toHaveLength(10);
   });
 
   it("should throw specific error when user not found", async () => {

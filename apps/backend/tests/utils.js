@@ -145,6 +145,7 @@ export const data_langs = {
             },
           },
         ],
+        pageInfo: { hasNextPage: false, endCursor: "cursor-1" },
       },
     },
   },

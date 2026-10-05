@@ -2,18 +2,22 @@ import { getConfig } from "../common/config.js";
 import { CustomError, MissingParamError } from "../common/error.js";
 import { wrapTextMultiline } from "../common/fmt.js";
 import { createGraphQLFetcher } from "../common/http.js";
+import type { GraphQLResponse } from "../common/http.js";
 import { logger } from "../common/log.js";
 import { parseOwnerAffiliations } from "../common/ops.js";
 import { retryer } from "../common/retryer.js";
 import { TopLanguagesDocument } from "../graphql/generated/top-languages.js";
 import type {
   TopLanguageFragment,
+  TopLanguagesQuery,
   TopLanguagesRepositoryFragment,
 } from "../graphql/generated/top-languages.js";
 
 import type { Lang, TopLangData } from "./types.js";
 
 const fetcher = createGraphQLFetcher(TopLanguagesDocument, "token");
+/** Upper bound on repository pages (100 repos each) to stay within the function timeout. */
+const MAX_REPOSITORY_PAGES = 10;
 
 /**
  * Fetch top languages for a given username.
@@ -39,34 +43,57 @@ const fetchTopLanguages = async (
   }
   const affiliations = parseOwnerAffiliations(ownerAffiliations);
 
-  const res = await retryer(
-    fetcher,
-    {
-      login: username,
-      ownerAffiliations: affiliations,
-    },
-    pat,
-  );
-
-  if (res.data.errors) {
-    logger.error(res.data.errors);
-    const firstError = res.data.errors[0];
-    if (firstError?.type === "NOT_FOUND") {
-      throw new CustomError(
-        firstError.message || "Could not fetch user.",
-        CustomError.USER_NOT_FOUND,
-      );
-    }
-    if (firstError?.message) {
-      throw new CustomError(
-        wrapTextMultiline(firstError.message, 525, 12)[0] ?? "",
-        res.statusText,
-      );
-    }
-    throw new CustomError(
-      "Something went wrong while trying to retrieve the language data using the GraphQL API.",
-      CustomError.GRAPHQL_ERROR,
+  // fetch every page of repositories, 100 per request
+  const allRepoNodes: Array<TopLanguagesRepositoryFragment | null> = [];
+  let after: string | null = null;
+  let hasNextPage = true;
+  let fetchedPages = 0;
+  while (hasNextPage && fetchedPages < MAX_REPOSITORY_PAGES) {
+    const res: Pick<
+      GraphQLResponse<TopLanguagesQuery>,
+      "data" | "statusText"
+    > = await retryer(
+      fetcher,
+      {
+        login: username,
+        ownerAffiliations: affiliations,
+        after,
+      },
+      pat,
     );
+
+    if (res.data.errors) {
+      logger.error(res.data.errors);
+      const firstError = res.data.errors[0];
+      if (firstError?.type === "NOT_FOUND") {
+        throw new CustomError(
+          firstError.message || "Could not fetch user.",
+          CustomError.USER_NOT_FOUND,
+        );
+      }
+      if (firstError?.message) {
+        throw new CustomError(
+          wrapTextMultiline(firstError.message, 525, 12)[0] ?? "",
+          res.statusText,
+        );
+      }
+      throw new CustomError(
+        "Something went wrong while trying to retrieve the language data using the GraphQL API.",
+        CustomError.GRAPHQL_ERROR,
+      );
+    }
+
+    fetchedPages++;
+    const repositories = res.data.data.user?.repositories;
+    allRepoNodes.push(...(repositories?.nodes ?? []));
+
+    const nextCursor: string | null = repositories?.pageInfo.endCursor ?? null;
+    // a null or non-advancing cursor would refetch the same page forever
+    hasNextPage =
+      !!repositories?.pageInfo.hasNextPage &&
+      nextCursor !== null &&
+      nextCursor !== after;
+    after = nextCursor;
   }
 
   const repoToHide: Record<string, boolean> = {};
@@ -81,7 +108,7 @@ const fetchTopLanguages = async (
   });
 
   // filter out repositories to be hidden
-  const repoNodes = (res.data.data.user?.repositories.nodes ?? []).filter(
+  const repoNodes = allRepoNodes.filter(
     (node): node is TopLanguagesRepositoryFragment =>
       !!node && !repoToHide[node.name],
   );
